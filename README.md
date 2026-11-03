@@ -8,7 +8,7 @@
 
 ## 截图
 
-<!-- 待添加 -->
+![文件类型管理界面](docs/assets/screenshot-file-types.png)
 
 ## 功能
 
