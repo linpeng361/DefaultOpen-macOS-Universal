@@ -1,0 +1,529 @@
+import AppKit
+import Foundation
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct ApplicationInfo: Identifiable, Hashable, Sendable {
+    let bundleIdentifier: String
+    let name: String
+    let url: URL
+    let documentTypes: [ApplicationDocumentType]
+    let supportedTypes: [SupportedType]
+    let searchAliases: [String]
+
+    init(bundleIdentifier: String, name: String, url: URL,
+         documentTypes: [ApplicationDocumentType] = [],
+         supportedTypes: [SupportedType], searchAliases: [String] = []) {
+        self.bundleIdentifier = bundleIdentifier
+        self.name = name
+        self.url = url
+        self.documentTypes = documentTypes
+        self.supportedTypes = supportedTypes
+        self.searchAliases = searchAliases
+    }
+
+    var id: String { bundleIdentifier }
+}
+
+enum ApplicationDocumentTypeSource: String, Hashable, Sendable {
+    case bundleDeclaration
+    case launchServices
+}
+
+struct ApplicationDocumentType: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let extensions: [String]
+    let mimeTypes: [String]
+    let declaredTypeIdentifiers: [String]
+    let role: String
+    let handlerRank: String?
+    let source: ApplicationDocumentTypeSource
+
+    init(id: String, name: String, extensions: [String], mimeTypes: [String],
+         declaredTypeIdentifiers: [String], role: String, handlerRank: String?,
+         source: ApplicationDocumentTypeSource) {
+        self.id = id
+        self.name = name
+        self.extensions = extensions
+        self.mimeTypes = mimeTypes
+        self.declaredTypeIdentifiers = declaredTypeIdentifiers
+        self.role = role
+        self.handlerRank = handlerRank
+        self.source = source
+    }
+
+    var isViewer: Bool { role.caseInsensitiveCompare("Viewer") == .orderedSame }
+}
+
+func coalescedApplicationDocumentTypes(
+    _ documents: [ApplicationDocumentType]
+) -> [ApplicationDocumentType] {
+    var order: [String] = []
+    var documentsByIdentifier: [String: ApplicationDocumentType] = [:]
+
+    for document in documents {
+        guard let existing = documentsByIdentifier[document.id] else {
+            order.append(document.id)
+            documentsByIdentifier[document.id] = document
+            continue
+        }
+        documentsByIdentifier[document.id] = ApplicationDocumentType(
+            id: existing.id,
+            name: existing.name,
+            extensions: uniqueValues(existing.extensions + document.extensions) {
+                $0.lowercased()
+            },
+            mimeTypes: uniqueValues(existing.mimeTypes + document.mimeTypes) {
+                $0.lowercased()
+            },
+            declaredTypeIdentifiers: uniqueValues(
+                existing.declaredTypeIdentifiers + document.declaredTypeIdentifiers,
+                key: { $0 }
+            ),
+            role: existing.role,
+            handlerRank: existing.handlerRank ?? document.handlerRank,
+            source: existing.source
+        )
+    }
+
+    return order.compactMap { documentsByIdentifier[$0] }
+}
+
+private func uniqueValues(_ values: [String], key: (String) -> String) -> [String] {
+    var seen = Set<String>()
+    return values.filter { seen.insert(key($0)).inserted }
+}
+
+struct SupportedType: Identifiable, Hashable, Sendable {
+    let contentTypeIdentifier: String
+    let extensions: [String]
+    private let systemDisplayName: String
+
+    init(contentTypeIdentifier: String, extensions: [String], displayName: String) {
+        self.contentTypeIdentifier = contentTypeIdentifier
+        self.extensions = extensions
+        systemDisplayName = displayName
+    }
+
+    var id: String { contentTypeIdentifier + extensions.joined(separator: ",") }
+    var displayName: String {
+        L10n.fileTypeDisplayName(systemName: systemDisplayName,
+                                 extensions: extensions,
+                                 identifier: contentTypeIdentifier)
+    }
+
+    var fileTypes: [FileTypeInfo] {
+        extensions.map {
+            FileTypeInfo(extensionName: $0,
+                         contentTypeIdentifier: contentTypeIdentifier,
+                         displayName: systemDisplayName)
+        }
+    }
+}
+
+struct FileTypeInfo: Identifiable, Hashable, Sendable {
+    let extensionName: String
+    let contentTypeIdentifier: String
+    private let systemDisplayName: String
+
+    init(extensionName: String, contentTypeIdentifier: String, displayName: String) {
+        self.extensionName = extensionName
+        self.contentTypeIdentifier = contentTypeIdentifier
+        systemDisplayName = displayName
+    }
+
+    var id: String { extensionName.lowercased() }
+    var dottedExtension: String { "." + extensionName }
+    var displayName: String {
+        L10n.fileTypeDisplayName(systemName: systemDisplayName,
+                                 extensions: [extensionName],
+                                 identifier: contentTypeIdentifier)
+    }
+    var specificDisplayName: String { systemDisplayName }
+}
+
+enum ApplicationCapabilitySource: Int, Comparable, Sendable {
+    case explicit = 0
+    case extensionDeclaration = 1
+    case broadDeclaration = 2
+    case systemRegistered = 3
+
+    static func < (lhs: ApplicationCapabilitySource,
+                   rhs: ApplicationCapabilitySource) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    var label: String {
+        switch self {
+        case .explicit: L10n.string("明确")
+        case .extensionDeclaration: L10n.string("扩展")
+        case .broadDeclaration: L10n.string("宽泛")
+        case .systemRegistered: L10n.string("系统")
+        }
+    }
+}
+
+struct ApplicationCapabilityEvidence: Equatable, Sendable {
+    let source: ApplicationCapabilitySource
+    let declaredTypeIdentifier: String?
+    let declaredExtension: String?
+
+    init(source: ApplicationCapabilitySource,
+         declaredTypeIdentifier: String? = nil,
+         declaredExtension: String? = nil) {
+        self.source = source
+        self.declaredTypeIdentifier = declaredTypeIdentifier
+        self.declaredExtension = declaredExtension
+    }
+
+    func explanation(for requestedIdentifier: String) -> String {
+        switch source {
+        case .explicit:
+            return L10n.format("capability.explicit", requestedIdentifier)
+        case .extensionDeclaration:
+            return L10n.format("capability.extension", declaredExtension ?? "—")
+        case .broadDeclaration:
+            return L10n.format("capability.broad", declaredTypeIdentifier ?? "—")
+        case .systemRegistered:
+            return L10n.string("capability.system")
+        }
+    }
+}
+
+struct ApplicationCapabilitySourceCounts: Equatable, Sendable {
+    var explicit = 0
+    var extensionDeclaration = 0
+    var broad = 0
+    var system = 0
+
+    init<S: Sequence>(_ evidence: S) where S.Element == ApplicationCapabilityEvidence {
+        for item in evidence {
+            switch item.source {
+            case .explicit: explicit += 1
+            case .extensionDeclaration: extensionDeclaration += 1
+            case .broadDeclaration: broad += 1
+            case .systemRegistered: system += 1
+            }
+        }
+    }
+
+    var total: Int { explicit + extensionDeclaration + broad + system }
+    var hasNonExplicit: Bool { extensionDeclaration > 0 || broad > 0 || system > 0 }
+    var summary: String {
+        L10n.format("capability.summary", explicit, extensionDeclaration, broad, system)
+    }
+}
+
+enum ApplicationCapabilityEvidenceResolver {
+    static func evidence(for application: ApplicationInfo,
+                         fileType: FileTypeInfo) -> ApplicationCapabilityEvidence {
+        let bundleDocuments = application.documentTypes.filter {
+            $0.source == .bundleDeclaration
+        }
+        let extensionName = fileType.extensionName.lowercased()
+        let requestedIdentifier = fileType.contentTypeIdentifier
+
+        if bundleDocuments.contains(where: {
+            $0.declaredTypeIdentifiers.contains(requestedIdentifier)
+        }) {
+            return ApplicationCapabilityEvidence(source: .explicit,
+                                                 declaredTypeIdentifier: requestedIdentifier)
+        }
+
+        if bundleDocuments.contains(where: { document in
+            document.extensions.contains {
+                $0.caseInsensitiveCompare(extensionName) == .orderedSame
+            }
+        }) {
+            return ApplicationCapabilityEvidence(source: .extensionDeclaration,
+                                                 declaredExtension: "." + extensionName)
+        }
+
+        guard let requestedType = UTType(requestedIdentifier) else {
+            return ApplicationCapabilityEvidence(source: .systemRegistered,
+                                                 declaredTypeIdentifier: nil)
+        }
+        let inherited = bundleDocuments.flatMap(\.declaredTypeIdentifiers).uniquedForEvidence()
+            .filter { identifier in
+                guard identifier != requestedIdentifier,
+                      let declaredType = UTType(identifier) else { return false }
+                return requestedType.conforms(to: declaredType)
+            }
+        if let closest = mostSpecificTypeIdentifier(in: inherited) {
+            return ApplicationCapabilityEvidence(source: .broadDeclaration,
+                                                 declaredTypeIdentifier: closest)
+        }
+        return ApplicationCapabilityEvidence(source: .systemRegistered,
+                                             declaredTypeIdentifier: nil)
+    }
+
+    static func evidence(for application: ApplicationInfo,
+                         urlScheme: String) -> ApplicationCapabilityEvidence {
+        let info = Bundle(url: application.url)?.infoDictionary ?? [:]
+        let urlTypes = info["CFBundleURLTypes"] as? [[String: Any]] ?? []
+        let declaredSchemes = urlTypes.flatMap { dictionary -> [String] in
+            if let values = dictionary["CFBundleURLSchemes"] as? [String] { return values }
+            if let value = dictionary["CFBundleURLSchemes"] as? String { return [value] }
+            return []
+        }
+        if declaredSchemes.contains(where: {
+            $0.caseInsensitiveCompare(urlScheme) == .orderedSame
+        }) {
+            return ApplicationCapabilityEvidence(source: .explicit,
+                                                 declaredTypeIdentifier: urlScheme.lowercased())
+        }
+        return ApplicationCapabilityEvidence(source: .systemRegistered,
+                                             declaredTypeIdentifier: nil)
+    }
+
+    private static func mostSpecificTypeIdentifier(in identifiers: [String]) -> String? {
+        identifiers.sorted().first { candidate in
+            guard let candidateType = UTType(candidate) else { return false }
+            return !identifiers.contains { other in
+                guard other != candidate, let otherType = UTType(other) else { return false }
+                return otherType.conforms(to: candidateType)
+            }
+        } ?? identifiers.sorted().first
+    }
+}
+
+private extension Sequence where Element == String {
+    func uniquedForEvidence() -> [String] {
+        var seen = Set<String>()
+        return filter { seen.insert($0).inserted }
+    }
+}
+
+enum SidebarSection: String, CaseIterable, Identifiable {
+    case fileTypes = "文件类型"
+    case applications = "应用程序"
+    case defaultApps = "默认 App"
+    case advanced = "高级功能"
+    var id: Self { self }
+    var symbol: String {
+        switch self {
+        case .fileTypes: "doc.badge.gearshape"
+        case .applications: "square.grid.2x2"
+        case .defaultApps: "checkmark.circle.fill"
+        case .advanced: "wrench.and.screwdriver"
+        }
+    }
+}
+
+enum FileTypeModificationRisk: Equatable, Sendable {
+    case normal
+    case broad
+    case protected
+}
+
+struct DefaultAppCategory: Identifiable, Hashable, Codable, Sendable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let coreExtensions: [String]
+    let optionalExtensions: [String]
+    let urlSchemes: [String]
+    var isCustom = false
+
+    var hasOptionalExtensions: Bool { !optionalExtensions.isEmpty }
+    func extensions(includingOptional: Bool) -> [String] {
+        coreExtensions + (includingOptional ? optionalExtensions : [])
+    }
+
+    @MainActor static var all: [DefaultAppCategory] {
+        let localize = LanguageSettings.shared.string
+        return [
+        .init(id: "browser", title: localize("默认浏览器"), subtitle: localize("网页链接与可选的本地网页文件"),
+              symbol: "safari", coreExtensions: [], optionalExtensions: ["html", "htm", "webarchive"],
+              urlSchemes: ["http", "https"]),
+        .init(id: "video", title: localize("默认视频播放器"), subtitle: localize("常见视频文件的默认播放器"),
+              symbol: "play.rectangle", coreExtensions: ["mp4", "mov", "m4v"],
+              optionalExtensions: ["mkv", "avi", "webm", "mpeg"], urlSchemes: []),
+        .init(id: "music", title: localize("默认音乐播放器"), subtitle: localize("常见音频文件的默认播放器"),
+              symbol: "music.note", coreExtensions: ["mp3", "m4a", "aac", "wav"],
+              optionalExtensions: ["flac", "ogg", "aiff"], urlSchemes: []),
+        .init(id: "image", title: localize("默认图片查看器"), subtitle: localize("常见图片文件的默认查看器"),
+              symbol: "photo", coreExtensions: ["jpg", "jpeg", "png", "heic", "gif"],
+              optionalExtensions: ["webp", "tiff", "bmp", "svg"], urlSchemes: []),
+        .init(id: "pdf", title: localize("默认 PDF 阅读器"), subtitle: localize("PDF 文档的默认阅读器"),
+              symbol: "doc.richtext", coreExtensions: ["pdf"], optionalExtensions: [], urlSchemes: []),
+        .init(id: "text", title: localize("默认文本编辑器"), subtitle: localize("纯文本与常见文本文件"),
+              symbol: "doc.plaintext", coreExtensions: ["txt", "log"],
+              optionalExtensions: ["md", "rtf", "json", "xml", "yaml", "yml", "csv"], urlSchemes: []),
+        .init(id: "archive", title: localize("默认解压软件"), subtitle: localize("压缩包与归档文件的默认处理程序"),
+              symbol: "archivebox", coreExtensions: ["zip", "rar", "7z"],
+              optionalExtensions: ["tar", "gz", "bz2", "xz"], urlSchemes: []),
+        .init(id: "word", title: localize("默认 Word 文档 App"), subtitle: localize("文字处理文档的默认编辑器"),
+              symbol: "doc.text", coreExtensions: ["doc", "docx"],
+              optionalExtensions: ["odt"], urlSchemes: []),
+        .init(id: "spreadsheet", title: localize("默认电子表格 App"), subtitle: localize("工作簿与电子表格的默认编辑器"),
+              symbol: "tablecells", coreExtensions: ["xls", "xlsx"],
+              optionalExtensions: ["ods", "csv"], urlSchemes: []),
+        .init(id: "presentation", title: localize("默认演示文稿 App"), subtitle: localize("幻灯片文件的默认编辑器"),
+              symbol: "rectangle.on.rectangle.angled", coreExtensions: ["ppt", "pptx"],
+              optionalExtensions: ["odp"], urlSchemes: [])
+        ]
+    }
+}
+
+struct DefaultAppCandidate: Identifiable, Sendable {
+    let application: ApplicationInfo
+    let supportedCount: Int
+    let totalCount: Int
+    let supportedTargets: [String]
+    let unsupportedTargets: [String]
+    let currentTargets: [String]
+    let isCurrentDefault: Bool
+    let typeDetails: [DefaultAppCandidateTypeDetail]
+    var id: String { application.id }
+
+    var supportedCapabilityEvidence: [ApplicationCapabilityEvidence] {
+        typeDetails.filter { $0.isSupported && $0.canChangeDefault }
+            .map(\.capabilityEvidence)
+    }
+
+    var capabilitySourceCounts: ApplicationCapabilitySourceCounts {
+        ApplicationCapabilitySourceCounts(supportedCapabilityEvidence)
+    }
+}
+
+enum DefaultAppTypeScopePolicy: Equatable, Sendable {
+    case automatic
+    case included
+    case excluded
+}
+
+struct DefaultAppCandidateTypeDetail: Identifiable, Sendable {
+    let id: String
+    let label: String
+    let typeName: String
+    let technicalIdentifier: String
+    let isSupported: Bool
+    let isCurrentDefault: Bool
+    let canCustomizeScope: Bool
+    let scopePolicy: DefaultAppTypeScopePolicy
+    let isAutomaticallyManaged: Bool
+    let isManaged: Bool
+    let canChangeDefault: Bool
+    let capabilityEvidence: ApplicationCapabilityEvidence
+}
+
+struct DefaultAppCategoryTypeDetail: Identifiable, Sendable {
+    let id: String
+    let label: String
+    let typeName: String
+    let technicalIdentifier: String
+    let modificationRisk: FileTypeModificationRisk
+    let canCustomizeScope: Bool
+    let scopePolicy: DefaultAppTypeScopePolicy
+    let isAutomaticallyManaged: Bool
+    let isManaged: Bool
+}
+
+struct DefaultAppChangeResult: Sendable {
+    let changedTargets: [String]
+    let skippedTargets: [String]
+    let unchangedTargets: [String]
+}
+
+struct DefaultAppAssignment: Identifiable, Sendable {
+    let application: ApplicationInfo
+    let targets: [String]
+    var id: String { application.id }
+}
+
+struct DefaultAppCategoryStatus: Sendable {
+    let unifiedApplication: ApplicationInfo?
+    let assignments: [DefaultAppAssignment]
+    let missingTargets: [String]
+    let ignoredTypeCount: Int
+
+    var isUnified: Bool { unifiedApplication != nil && missingTargets.isEmpty }
+}
+
+struct AppIcon: View {
+    let url: URL?
+    var size: CGFloat = 32
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+            } else {
+                Image(systemName: "app.dashed")
+                    .resizable()
+                    .foregroundStyle(.secondary)
+                    .padding(4)
+            }
+        }
+        .aspectRatio(contentMode: .fit)
+        .frame(width: size, height: size)
+        .task(id: url?.path) {
+            guard let url else {
+                image = nil
+                return
+            }
+            image = await ApplicationIconCache.shared.icon(for: url)
+        }
+    }
+}
+
+struct CapabilitySourceBadge: View {
+    let evidence: ApplicationCapabilityEvidence
+    let requestedIdentifier: String
+
+    var body: some View {
+        Text(evidence.source.label)
+            .font(.caption2.weight(.semibold))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(foregroundColor.opacity(0.12), in: Capsule())
+            .help(evidence.explanation(for: requestedIdentifier))
+    }
+
+    private var foregroundColor: Color {
+        switch evidence.source {
+        case .explicit: .green
+        case .extensionDeclaration: .blue
+        case .broadDeclaration: .orange
+        case .systemRegistered: .secondary
+        }
+    }
+}
+
+private final class ApplicationIconCache: @unchecked Sendable {
+    static let shared = ApplicationIconCache()
+
+    private let images = NSCache<NSURL, NSImage>()
+    private let lock = NSLock()
+
+    private init() {
+        images.countLimit = 256
+    }
+
+    func icon(for url: URL) async -> NSImage {
+        if let cached = cachedIcon(for: url) { return cached }
+
+        let image = await Task.detached(priority: .userInitiated) {
+            NSWorkspace.shared.icon(forFile: url.path)
+        }.value
+
+        lock.withLock {
+            images.setObject(image, forKey: url as NSURL)
+        }
+        return image
+    }
+
+    private func cachedIcon(for url: URL) -> NSImage? {
+        lock.withLock {
+            images.object(forKey: url as NSURL)
+        }
+    }
+}
