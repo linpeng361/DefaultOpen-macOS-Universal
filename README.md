@@ -27,7 +27,7 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/你的用户名/DefaultOpen-macOS-Universal/releases) 下载最新版本：
+前往 [Releases](https://github.com/linpeng361/DefaultOpen-macOS-Universal/releases) 下载最新版本：
 
 | 文件 | 说明 |
 |------|------|
@@ -53,7 +53,7 @@ shasum -a 256 -c DefaultOpen-v1.0.9-universal.sha256
 仅需 Xcode Command Line Tools（无需完整 Xcode）：
 
 ```bash
-git clone https://github.com/你的用户名/DefaultOpen-macOS-Universal.git
+git clone https://github.com/linpeng361/DefaultOpen-macOS-Universal.git
 cd DefaultOpen-macOS-Universal
 ./build-universal.sh
 ```
